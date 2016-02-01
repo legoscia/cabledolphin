@@ -45,6 +45,10 @@
 (defvar cabledolphin-pcap-file nil
   "File to which captured data is appended.")
 
+(defvar cabledolphin-connection-name-regexps ()
+  "Trace new connections whose name matches one of these regexps.
+See `cabledolphin-trace-new-connections'.")
+
 ;; See pcap file format spec at
 ;; https://wiki.wireshark.org/Development/LibpcapFileFormat
 (defconst cabledolphin--pcap-header-bindat-spec
@@ -148,12 +152,36 @@
   (advice-add 'process-send-string :before 'cabledolphin--process-send-string)
   (advice-add 'process-send-region :before 'cabledolphin--process-send-region))
 
+;;;###autoload
+(defun cabledolphin-trace-new-connections (regexp)
+  (interactive "sCapture network traffic for new connections matching regexp: ")
+  (unless cabledolphin-pcap-file
+    (call-interactively 'cabledolphin-set-pcap-file))
+  (push regexp cabledolphin-connection-name-regexps)
+  (advice-add 'make-network-process :filter-return 'cabledolphin--maybe-trace-new))
+
 (defun cabledolphin-stop ()
   (interactive)
+  (advice-remove 'make-network-process 'cabledolphin--maybe-trace-new)
   (advice-remove 'process-send-string 'cabledolphin--process-send-string)
   (advice-remove 'process-send-region 'cabledolphin--process-send-region)
   (dolist (process (process-list))
     (remove-function (process-filter process) 'cabledolphin--filter)))
+
+(defun cabledolphin--maybe-trace-new (process)
+  ;; This is a filter-return function, but we never want to change the
+  ;; return value.  Take care of that with `prog1'.
+  (prog1 process
+    (let ((name (process-name process))
+	  (contact (process-contact process)))
+      (when (and
+	     ;; First ensure it's actually a network process.
+	     (listp contact)
+	     ;; Then check the regexps.
+	     (cl-some
+	      (lambda (regexp) (string-match-p regexp name))
+	      cabledolphin-connection-name-regexps))
+	(cabledolphin-trace-existing-connection process)))))
 
 (defun cabledolphin--filter (process data)
   (when (process-get process :cabledolphin-traced)
