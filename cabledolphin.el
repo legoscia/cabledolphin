@@ -32,10 +32,23 @@
 ;; TCP/IP headers to the minimum extent required to keep Wireshark
 ;; happy.
 ;;
-;; To start capturing packets for a certain connection, invoke
-;; `cabledolphin-trace-existing-connection'.  To change the file that
-;; data is written to, invoke `cabledolphin-set-pcap-file'.  To stop
-;; capturing, invoke `cabledolphin-stop'.
+;; Available commands:
+;;
+;; - `cabledolphin-trace-new-connections': start capturing packets for
+;;   any new connections whose name matches a certain regexp.
+;;
+;; - `cabledolphin-trace-existing-connection': start capturing packets
+;;   for an existing connection.
+;;
+;; - `cabledolphin-set-pcap-file': change the file that data is
+;;   written to.
+;;
+;; - `cabledolphin-stop': stop capturing, and stop matching new
+;;   connections.
+;;
+;; NB: since Cabledolphin works by advising the filter function of the
+;; connection, it won't work very well for connections that change the
+;; filter function, such as `url-http'.
 
 ;;; Code:
 
@@ -112,6 +125,11 @@ See `cabledolphin-trace-new-connections'.")
 
 ;;;###autoload
 (defun cabledolphin-set-pcap-file (file)
+  "Set the file where captured network data is written to.
+
+If the file doesn't exist, or is empty, a PCAP file header will
+be written to it.  Otherwise, any new data will be appended to
+the file."
   (interactive "FWrite data to pcap file: ")
   (setq cabledolphin-pcap-file file)
 
@@ -135,6 +153,7 @@ See `cabledolphin-trace-new-connections'.")
 
 ;;;###autoload
 (defun cabledolphin-trace-existing-connection (process)
+  "Start capturing network data for an existing connection."
   (interactive
    (list
     (get-process
@@ -154,6 +173,8 @@ See `cabledolphin-trace-new-connections'.")
 
 ;;;###autoload
 (defun cabledolphin-trace-new-connections (regexp)
+  "Capture data for any new connections matching REGEXP.
+Matching is done against the process name."
   (interactive "sCapture network traffic for new connections matching regexp: ")
   (unless cabledolphin-pcap-file
     (call-interactively 'cabledolphin-set-pcap-file))
@@ -161,6 +182,7 @@ See `cabledolphin-trace-new-connections'.")
   (advice-add 'make-network-process :filter-return 'cabledolphin--maybe-trace-new))
 
 (defun cabledolphin-stop ()
+  "Stop all tracing."
   (interactive)
   (advice-remove 'make-network-process 'cabledolphin--maybe-trace-new)
   (advice-remove 'process-send-string 'cabledolphin--process-send-string)
