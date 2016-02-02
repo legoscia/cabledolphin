@@ -47,10 +47,6 @@
 ;;
 ;; - `cabledolphin-stop': stop capturing, and stop matching new
 ;;   connections.
-;;
-;; NB: since Cabledolphin works by advising the filter function of the
-;; connection, it won't work very well for connections that change the
-;; filter function, such as `url-http'.
 
 ;;; Code:
 
@@ -170,6 +166,7 @@ the file."
   (process-put process :cabledolphin-seq-in 0)
   (process-put process :cabledolphin-seq-out 0)
   (add-function :before (process-filter process) 'cabledolphin--filter)
+  (advice-add 'set-process-filter :filter-args 'cabledolphin--set-process-filter)
   (advice-add 'process-send-string :before 'cabledolphin--process-send-string)
   (advice-add 'process-send-region :before 'cabledolphin--process-send-region))
 
@@ -187,10 +184,22 @@ Matching is done against the process name."
   "Stop all tracing."
   (interactive)
   (advice-remove 'make-network-process 'cabledolphin--maybe-trace-new)
+  (advice-remove 'set-process-filter 'cabledolphin--set-process-filter)
   (advice-remove 'process-send-string 'cabledolphin--process-send-string)
   (advice-remove 'process-send-region 'cabledolphin--process-send-region)
   (dolist (process (process-list))
     (remove-function (process-filter process) 'cabledolphin--filter)))
+
+(defun cabledolphin--set-process-filter (args)
+  (let ((process (car args))
+	(filter-function (cadr args)))
+    (when (process-get process :cabledolphin-traced)
+      (when (symbolp filter-function)
+	(setq filter-function (symbol-function filter-function)))
+
+      (unless (advice-function-member-p 'cabledolphin--filter filter-function)
+	(add-function :before (var filter-function) 'cabledolphin--filter)))
+    (list process filter-function)))
 
 (defun cabledolphin--maybe-trace-new (process)
   ;; This is a filter-return function, but we never want to change the
