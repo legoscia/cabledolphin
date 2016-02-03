@@ -243,10 +243,16 @@ the file."
 		     (snap-len . 65536)))))
 	     (insert (cabledolphin--pcapng-block
 		      cabledolphin--pcapng-section-header-block-type
-		      section-header))
+		      section-header
+		      ;; shb_os
+		      3 (emacs-version)
+		      ;; shb_userappl
+		      4 "cabledolphin"))
 	     (insert (cabledolphin--pcapng-block
 		      cabledolphin--pcapng-interface-description-block-type
-		      interface-description)))))
+		      interface-description
+		      ;; if_description
+		      3 "virtual interface, synthetic TCP/IP packets")))))
 
 	(let ((coding-system-for-write 'binary))
 	  (write-region (point-min) (point-max) file nil :silent))))))
@@ -338,7 +344,29 @@ Matching is done against the process name."
      :from :local
      :to :remote)))
 
-(defun cabledolphin--pcapng-block (block-type block-data)
+(defun cabledolphin--pcapng-block (block-type block-data &rest option-codes-values)
+  (let (options)
+    (while option-codes-values
+      (let ((code (pop option-codes-values))
+	    (value (pop option-codes-values)))
+	(push
+	 (bindat-pack
+	  cabledolphin--pcapng-option-bindat-spec
+	  `((code . ,code)
+	    (length . ,(length value))
+	    (value . ,value)))
+	 options)))
+    (when options
+      ;; If there are options, the last option must be opt_endofopt.
+      (push
+       (bindat-pack
+	cabledolphin--pcapng-option-bindat-spec
+	'((code . 0)
+	  (length . 0)
+	  (value . "")))
+       options)
+      (setq options (nreverse options))
+      (setq block-data (apply 'vconcat block-data options))))
   (bindat-pack
    cabledolphin--pcapng-block-bindat-spec
    `((type . ,block-type)
