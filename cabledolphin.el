@@ -56,10 +56,14 @@
 (defvar cabledolphin-pcap-file nil
   "File to which captured data is appended.")
 
+(defvar cabledolphin-output-type 'pcapng
+  "The file format to output.  Either `pcap' or `pcapng'.")
+
 (defvar cabledolphin-connection-name-regexps ()
   "Trace new connections whose name matches one of these regexps.
 See `cabledolphin-trace-new-connections'.")
 
+;;; Pcap bindat specs
 ;; See pcap file format spec at
 ;; https://wiki.wireshark.org/Development/LibpcapFileFormat
 (defconst cabledolphin--pcap-header-bindat-spec
@@ -85,6 +89,76 @@ See `cabledolphin-trace-new-connections'.")
     (incl-len u32)
     (orig-len u32))
   "Bindat spec for big-endian pcap packet header.")
+
+;;; Pcap-ng bindat specs
+;; See pcap-ng spec at:
+;; https://github.com/pcapng/pcapng
+
+(defconst cabledolphin--pcapng-block-bindat-spec
+  '(
+    ;; Give block type as a vector, so this works on 32-bit Emacsen.
+    (type vec 4 u8)
+    (total-length u32)
+    (body vec (eval (- last 12)) u8)
+    ;; The block length appears twice in the block.
+    (total-length u32))
+  "Bindat spec for pcapng block.")
+
+(defconst cabledolphin--pcapng-section-header-block-type
+  [#x0a #x0d #x0d #x0a])
+
+(defconst cabledolphin--pcapng-section-header-bindat-spec
+  '((byte-order-magic vec 4 u8)
+    (major-version u16)
+    (minor-version u16)
+    (section-length vec 8 u8))
+  "Bindat spec for pcapng section header block, without options.
+This generates big-endian output, so the \"byte order magic\"
+should be set appropriately.")
+
+(defconst cabledolphin--pcapng-option-bindat-spec
+  '((code u16)
+    (length u16)
+    (value vec (length) u8)
+    (align 4))
+  "Bindat spec for pcapng option.")
+
+(defconst cabledolphin--pcapng-interface-description-block-type
+  [0 0 0 1])
+
+(defconst cabledolphin--pcapng-interface-description-bindat-spec
+  '((link-type u16)
+    (reserved u16)
+    (snap-len u32))
+  "Bindat spec for pcapng interface description block, without options.")
+
+(defconst cabledolphin--pcapng-enhanced-packet-block-type
+  [0 0 0 6])
+
+(defconst cabledolphin--pcapng-enhanced-packet-bindat-spec
+  '((interface-id u32)
+    ;; The timestamp is a 64-bit value, saved as two 32-bit words.
+    ;; To make this work on 32-bit Emacsen, let's split it into
+    ;; four 16-bit integers.
+    (timestamp vec 4 u16)
+    (captured-packet-length u32)
+    (original-packet-length u32)
+    (packet-data vec (captured-packet-length) u8)
+    (align 4))
+  "Bindat spec for pcapng enhanced packet block, without options.")
+
+(defconst cabledolphin--pcapng-name-resolution-block-type
+  [0 0 0 4])
+
+(defconst cabledolphin--pcapng-name-resolution-record-bindat-spec
+  '((type u16)
+    (value-length u16)
+    (value vec (value-length) u8)
+    (align 4))
+  "Bindat spec for a name resolution record.
+Concatenate several of these to create a name resolution block.")
+
+;;; network packet bindat specs
 
 (defconst cabledolphin--ipv4-bindat-spec
   '((version-and-header-length u8)
@@ -121,6 +195,8 @@ See `cabledolphin-trace-new-connections'.")
     (urgent-pointer u16))
   "Bindat spec for TCP header, without options.")
 
+;;; Functions
+
 ;;;###autoload
 (defun cabledolphin-set-pcap-file (file)
   "Set the file where captured network data is written to.
@@ -137,15 +213,41 @@ the file."
     (when (or (null attributes)
 	      (zerop (nth 7 attributes)))
       (with-temp-buffer
-	(insert (bindat-pack cabledolphin--pcap-header-bindat-spec
-			     '((magic-number . [#xa1 #xb2 #xc3 #xd4])
-			       (version-major . 2)
-			       (version-minor . 4)
-			       (thiszone . 0)
-			       (sigfigs . 0)
-			       (snaplen . 65535)
-			       ;; 101 is LINKTYPE_RAW, for raw IPv4/IPv6
-			       (network . 101))))
+	(cl-ecase cabledolphin-output-type
+	  (pcap
+	   (insert (bindat-pack cabledolphin--pcap-header-bindat-spec
+				'((magic-number . [#xa1 #xb2 #xc3 #xd4])
+				  (version-major . 2)
+				  (version-minor . 4)
+				  (thiszone . 0)
+				  (sigfigs . 0)
+				  (snaplen . 65535)
+				  ;; 101 is LINKTYPE_RAW, for raw IPv4/IPv6
+				  (network . 101)))))
+	  (pcapng
+	   (let ((section-header
+		  (bindat-pack
+		   cabledolphin--pcapng-section-header-bindat-spec
+		   '((byte-order-magic . [#x1a #x2b #x3c #x4d])
+		     (major-version . 1)
+		     (minor-version . 0)
+		     (section-length . [#xff #xff #xff #xff #xff #xff #xff #xff]))))
+		 (interface-description
+		  (bindat-pack
+		   cabledolphin--pcapng-interface-description-bindat-spec
+		   ;; 101 is LINKTYPE_RAW, for raw IPv4/IPv6
+		   '((link-type . 101)
+		     (reserved . 0)
+		     ;; According to the spec, snap-len 0 means "unlimited",
+		     ;; but tcpdump doesn't like that.  Set it to 65536 instead.
+		     (snap-len . 65536)))))
+	     (insert (cabledolphin--pcapng-block
+		      cabledolphin--pcapng-section-header-block-type
+		      section-header))
+	     (insert (cabledolphin--pcapng-block
+		      cabledolphin--pcapng-interface-description-block-type
+		      interface-description)))))
+
 	(let ((coding-system-for-write 'binary))
 	  (write-region (point-min) (point-max) file nil :silent))))))
 
@@ -236,81 +338,122 @@ Matching is done against the process name."
      :from :local
      :to :remote)))
 
+(defun cabledolphin--pcapng-block (block-type block-data)
+  (bindat-pack
+   cabledolphin--pcapng-block-bindat-spec
+   `((type . ,block-type)
+     (total-length . ,(+ 12 (length block-data)))
+     (body . ,block-data))))
+
 (cl-defun cabledolphin--write-packet
     (process data &key seq-key ((:from from-key)) ((:to to-key)))
   ;; Ensure that data is binary.  This is idempotent.
   (setq data (encode-coding-string data 'binary t))
   (with-temp-buffer
     (let* ((time (current-time))
+	   (time-high (nth 0 time))
+	   (time-low (nth 1 time))
+	   (time-usec (nth 2 time))
 	   (len (length data))
 	   (contact (process-contact process t))
 	   (from (plist-get contact from-key))
 	   (to (plist-get contact to-key))
 	   (seq (process-get process seq-key))
-	   (ip-version
-	    (if (= 9 (length from))
-		6
-	      4))
-	   (len-with-tcp
-	    (+ len (bindat-length cabledolphin--tcp-bindat-spec ())))
-	   (total-len
-	    (+ len-with-tcp
-	       (if (= ip-version 6)
-		   (bindat-length cabledolphin--ipv6-bindat-spec ())
-		 (bindat-length cabledolphin--ipv4-bindat-spec ())))))
+	   (tcp-ip-packet (cabledolphin--tcp-ip-packet from to seq data))
+	   (total-len (length tcp-ip-packet)))
       
-      (insert (bindat-pack cabledolphin--pcap-packet-header-bindat-spec
-			   `((ts-sec-high . ,(nth 0 time))
-			     (ts-sec-low . ,(nth 1 time))
-			     (ts-usec . ,(nth 2 time))
-			     (incl-len . ,total-len)
-			     (orig-len . ,total-len))))
+      (cl-ecase cabledolphin-output-type
+	(pcap
+	 (insert (bindat-pack cabledolphin--pcap-packet-header-bindat-spec
+			      `((ts-sec-high . ,time-high)
+				(ts-sec-low . ,time-low)
+				(ts-usec . ,time-usec)
+				(incl-len . ,total-len)
+				(orig-len . ,total-len)))
+		 tcp-ip-packet))
 
-      ;; Create a fake IP header.
-      (cl-case ip-version
-	(4
-	 (insert (bindat-pack cabledolphin--ipv4-bindat-spec
-			      `((version-and-header-length . #x45)
-				(total-length . ,total-len)
-				(identification . 0)
-				(flags-and-fragment-offset . 0)
-				(ttl . 128)
-				;; protocol 6 for TCP
-				(protocol . 6)
-				(header-checksum . 0)
-				(src-addr . ,(seq-take from 4))
-				(dest-addr . ,(seq-take to 4))))))
-	(6
-	 (insert (bindat-pack cabledolphin--ipv6-bindat-spec
-			      `((version-etc . #x60)
-				(payload-length . ,len-with-tcp)
-				;; protocol 6 for TCP
-				(next-header . 6)
-				(hop-limit . 128)
-				(src-addr . ,(seq-take from 8))
-				(dest-addr . ,(seq-take to 8)))))))
+	(pcapng
+	 ;; For pcapng, the timestamp is the number of microseconds
+	 ;; since the epoch, as a 64-bit integer.  Need to do some
+	 ;; conversion here.  Let's use calc, as it has bignum
+	 ;; support.
 
-      ;; Create a fake TCP header.
-      (insert (bindat-pack cabledolphin--tcp-bindat-spec
-			   `((src-port . ,(elt from (1- (length from))))
-			     (dest-port . ,(elt to (1- (length to))))
-			     (seq . ,seq)
-			     (ack . 0)
-			     (data-offset-and-reserved . #x50)
-			     ;; set SYN and PSH
-			     (flags . (3 4))
-			     (window-size . 16384)
-			     (checksum . 0)
-			     (urgent-pointer . 0))))
-
-      ;; Finally insert the actual data.
-      (insert data)
+	 (let* ((total-usec
+		 (calc-eval
+		  '("or(or(lsh($, 16), $$) * 1000000, $$$)" calc-word-size 64)
+		  'raw
+		  time-high time-low time-usec))
+		(total-usec-words
+		 (calc-eval
+		  '("[rsh($, 48), and(rsh($, 32), 16#ffff), and(rsh($, 16), 16#ffff), and($, 16#ffff)]" calc-word-size 64)
+		  'rawnum
+		  total-usec))
+		(timestamp (apply 'vector (cdr total-usec-words))))
+	   (insert
+	    (cabledolphin--pcapng-block
+	     cabledolphin--pcapng-enhanced-packet-block-type
+	     (bindat-pack cabledolphin--pcapng-enhanced-packet-bindat-spec
+			  `((interface-id . 0)
+			    (timestamp . ,timestamp)
+			    (captured-packet-length . ,total-len)
+			    (original-packet-length . ,total-len)
+			    (packet-data . ,tcp-ip-packet))))))))
 
       ;; Insert our sequence counter.
       (process-put process seq-key (+ seq len))
 
       (let ((coding-system-for-write 'binary))
 	(write-region (point-min) (point-max) cabledolphin-pcap-file t :silent)))))
+
+(defun cabledolphin--tcp-ip-packet (from to seq data)
+  (let ((ip-version
+	 (if (= 9 (length from))
+	     6
+	   4))
+	(len-with-tcp
+	 (+ (length data) (bindat-length cabledolphin--tcp-bindat-spec ()))))
+    (vconcat
+     ;; Create a fake IP header.
+     (cl-ecase ip-version
+       (4
+	(let ((total-len
+	       (+ len-with-tcp (bindat-length cabledolphin--ipv4-bindat-spec ()))))
+	  (bindat-pack cabledolphin--ipv4-bindat-spec
+		       `((version-and-header-length . #x45)
+			 (total-length . ,total-len)
+			 (identification . 0)
+			 (flags-and-fragment-offset . 0)
+			 (ttl . 128)
+			 ;; protocol 6 for TCP
+			 (protocol . 6)
+			 (header-checksum . 0)
+			 (src-addr . ,(seq-take from 4))
+			 (dest-addr . ,(seq-take to 4))))))
+       (6
+	(bindat-pack cabledolphin--ipv6-bindat-spec
+		     `((version-etc . #x60)
+		       (payload-length . ,len-with-tcp)
+		       ;; protocol 6 for TCP
+		       (next-header . 6)
+		       (hop-limit . 128)
+		       (src-addr . ,(seq-take from 8))
+		       (dest-addr . ,(seq-take to 8))))))
+
+     ;; Create a fake TCP header.
+     (bindat-pack cabledolphin--tcp-bindat-spec
+		  `((src-port . ,(elt from (1- (length from))))
+		    (dest-port . ,(elt to (1- (length to))))
+		    (seq . ,seq)
+		    (ack . 0)
+		    (data-offset-and-reserved . #x50)
+		    ;; set SYN and PSH
+		    (flags . (3 4))
+		    (window-size . 16384)
+		    (checksum . 0)
+		    (urgent-pointer . 0)))
+
+     ;; Finally insert the actual data.
+     data)))
 
 (provide 'cabledolphin)
 ;;; cabledolphin.el ends here
