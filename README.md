@@ -1,5 +1,5 @@
 # cabledolphin
-Capture network traffic from Emacs Lisp programs into PCAP files
+Capture network traffic from Emacs Lisp programs into PCAPNG files
 
 To install it, type `M-x package-install-file` and select the
 `cabledolphin.el` file.
