@@ -425,7 +425,17 @@ Matching is done against the process name."
 			    (timestamp . ,timestamp)
 			    (captured-packet-length . ,total-len)
 			    (original-packet-length . ,total-len)
-			    (packet-data . ,tcp-ip-packet))))))))
+			    (packet-data . ,tcp-ip-packet)))
+	     ;; epb_flags - inbound or outbound?
+	     ;; The spec says that inbound/outbound is contained
+	     ;; in the two most significant bits, but that's not
+	     ;; how Wireshark interprets it.  Let's side with
+	     ;; Wireshark for now.
+	     2 (cl-ecase from-key
+		 (:local
+		  [#x00 #x00 #x00 #x02])
+		 (:remote
+		  [#x00 #x00 #x00 #x01])))))))
 
       ;; Insert our sequence counter.
       (process-put process seq-key (+ seq len))
