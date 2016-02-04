@@ -63,6 +63,8 @@
   "Trace new connections whose name matches one of these regexps.
 See `cabledolphin-trace-new-connections'.")
 
+(defvar cabledolphin--dns-names (make-hash-table :test 'equal))
+
 ;;; Pcap bindat specs
 ;; See pcap file format spec at
 ;; https://wiki.wireshark.org/Development/LibpcapFileFormat
@@ -255,7 +257,8 @@ the file."
 		      3 "virtual interface, synthetic TCP/IP packets")))))
 
 	(let ((coding-system-for-write 'binary))
-	  (write-region (point-min) (point-max) file nil :silent))))))
+	  (write-region (point-min) (point-max) file nil :silent))
+	(clrhash cabledolphin--dns-names)))))
 
 ;;;###autoload
 (defun cabledolphin-trace-existing-connection (process)
@@ -401,6 +404,52 @@ Matching is done against the process name."
 		 tcp-ip-packet))
 
 	(pcapng
+	 ;; If we know of a mapping between a hostname and an IP
+	 ;; address, write a name resolution block if we haven't
+	 ;; before.
+	 (let ((remote-address-port (plist-get contact :remote))
+	       (host (plist-get contact :host)))
+	   ;; Check that host is not just an IP address.
+	   (unless (string-match-p "^[0-9.:]+$" host)
+	     (let* ((remote-address
+		     (seq-take remote-address-port (1- (length remote-address-port))))
+		    (hostz (vconcat host [0]))
+		    (key (cons remote-address host)))
+	       (unless (gethash key cabledolphin--dns-names)
+		 (insert
+		  (cabledolphin--pcapng-block
+		   cabledolphin--pcapng-name-resolution-block-type
+		   (vconcat
+		    (cl-ecase (length remote-address)
+		      (4
+		       (let ((value (vconcat remote-address hostz)))
+			 (bindat-pack
+			  cabledolphin--pcapng-name-resolution-record-bindat-spec
+			  ;; nrb_record_ipv4 = 1
+			  `((type . 1)
+			    (value-length . ,(length value))
+			    (value . ,value)))))
+		      (8
+		       (let ((value (vconcat (cl-mapcan
+					      (lambda (sixteen-bits)
+						(list (ash sixteen-bits -8)
+						      (logand sixteen-bits #xff)))
+					      remote-address)
+					     hostz)))
+			 (bindat-pack
+			  cabledolphin--pcapng-name-resolution-record-bindat-spec
+			  ;; nrb_record_ipv6 = 2
+			  `((type . 2)
+			    (value-length . ,(length value))
+			    (value . ,value))))))
+		    (bindat-pack
+		     cabledolphin--pcapng-name-resolution-record-bindat-spec
+		     ;; nrb_record_end = 0
+		     '((type . 0)
+		       (value-length . 0)
+		       (value . ""))))))
+		 (puthash key t cabledolphin--dns-names)))))
+
 	 ;; For pcapng, the timestamp is the number of microseconds
 	 ;; since the epoch, as a 64-bit integer.  Need to do some
 	 ;; conversion here.  Let's use calc, as it has bignum
